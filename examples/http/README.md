@@ -1,0 +1,1 @@
+This example expects the OPA server running on localhost, e.g. started with `opa run -s`.

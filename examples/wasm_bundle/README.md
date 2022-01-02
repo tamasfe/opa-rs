@@ -1,0 +1,1 @@
+The bundle in this directory was built with `opa build -t wasm -e example/project_permissions -e example/user_project -o example.tar.gz ../example.rego`.

@@ -1,0 +1,52 @@
+[package]
+name = "opa-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.52"
+bytes = "1.1.0"
+serde = { version = "1.0.133", features = ["derive"] }
+serde_json = "1.0.74"
+thiserror = "1.0.30"
+
+flate2 = { version = "1.0.22", optional = true }
+tar = { version = "0.4.38", optional = true }
+
+reqwest = { version = "0.11.8", features = ["json"], optional = true }
+url = { version = "2.2.2", optional = true }
+uuid = { version = "0.8.2", features = ["serde"], optional = true }
+
+wasmtime = { version = "0.32.0", optional = true }
+
+[dev-dependencies]
+criterion = "0.3.5"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[features]
+default = ["bundle"]
+
+bundle = [
+    "flate2",
+    "tar",
+]
+
+http = ["reqwest", "url", "uuid"]
+
+wasm = ["wasmtime"]
+
+[[example]]
+name = "wasm_bundle"
+required-features = ["bundle", "wasm"]
+
+[[example]]
+name = "http"
+required-features = ["http"]
+
+[[bench]]
+name = "bench_wasm_eval"
+required-features = ["bundle", "wasm"]
+harness = false
