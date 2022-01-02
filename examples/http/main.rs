@@ -1,4 +1,4 @@
-use opa_client::{
+use opa::{
     http::{Opa, Policy},
     PolicyDecision,
 };

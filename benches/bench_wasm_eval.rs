@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use opa_client::{bundle::Bundle, wasm::Opa};
+use opa::{bundle::Bundle, wasm::Opa};
 use serde_json::{json, Value};
 
 fn criterion_benchmark(c: &mut Criterion) {

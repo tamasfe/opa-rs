@@ -1,4 +1,4 @@
-use opa_client::{bundle::Bundle, wasm::Opa};
+use opa::{bundle::Bundle, wasm::Opa};
 use serde_json::{json, Value};
 
 fn main() -> Result<(), anyhow::Error> {
