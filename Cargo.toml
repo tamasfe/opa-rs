@@ -1,10 +1,10 @@
 [package]
 name = "opa"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Unofficial SDK library for Open Policy Agent"
-repository = "https://github.com/tamasfe/opa-client-rs"
-homepage = "https://github.com/tamasfe/opa-client-rs"
+repository = "https://github.com/tamasfe/opa-rs"
+homepage = "https://github.com/tamasfe/opa-rs"
 license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

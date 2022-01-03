@@ -2,7 +2,7 @@
 
 use crate::PolicyDecision;
 use anyhow::anyhow;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, io::copy, string::String, sync::Arc};
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
@@ -16,7 +16,7 @@ pub struct OpaBuilder {
 
 impl OpaBuilder {
     /// Set a handler function for OPA aborts.
-    /// 
+    ///
     /// If not set, the default handler will panic on abort.
     #[must_use]
     pub fn on_abort<F>(mut self, f: F) -> Self
@@ -161,10 +161,10 @@ impl Opa {
     }
 
     /// Set or override the contextual data for OPA.
-    /// 
+    ///
     /// Unlike the OPA HTTP API, the entire dataset must be
     /// provided every time and no patching is possible.
-    /// 
+    ///
     /// # Errors
     ///
     /// Internal WASM errors are returned.
@@ -192,6 +192,11 @@ impl Opa {
         I: Serialize,
         R: DeserializeOwned,
     {
+        #[derive(Deserialize)]
+        struct OpaOutput<R> {
+            result: R,
+        }
+
         let opa_eval_ctx_new = self
             .instance
             .get_typed_func::<(), u32, _>(&mut self.store, "opa_eval_ctx_new")?;
@@ -237,13 +242,20 @@ impl Opa {
 
         let result_addr = opa_eval_ctx_get_result.call(&mut self.store, (ctx_addr,))?;
 
-        let result = self.json_at::<R>(result_addr.into());
+        // TODO: this will return an array of results (OpaOutput<_>)
+        //      I'm not sure about the reason for this, but for now we are only interested
+        //      in the first one.
+        let result: Result<Vec<OpaOutput<R>>, _> = self.json_at(result_addr.into());
 
         self.free(result_addr.into())?;
         self.free(input_addr)?;
         self.free(ctx_addr.into())?;
 
-        result
+        result.and_then(|mut out| {
+            out.pop()
+                .map(|r| r.result)
+                .ok_or_else(|| anyhow!("the query produced no results"))
+        })
     }
 
     /// Same as [`Self::eval`] with an alternative API.
