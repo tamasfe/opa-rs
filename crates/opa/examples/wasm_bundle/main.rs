@@ -2,9 +2,9 @@ use opa::{bundle::Bundle, wasm::Opa};
 use serde_json::{json, Value};
 
 fn main() -> Result<(), anyhow::Error> {
-    let mut bundle = Bundle::from_bytes(include_bytes!("./example.tar.gz"))?;
+    let bundle = Bundle::from_bytes(include_bytes!("./example.tar.gz"))?;
 
-    let mut opa = Opa::new().build(bundle.wasm_policies.pop().unwrap().bytes)?;
+    let mut opa = Opa::new().build_from_bundle(&bundle)?;
 
     let data = json!({
         "users": {

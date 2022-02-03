@@ -6,6 +6,30 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, io::copy, string::String, sync::Arc};
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
+/// Compile a `.rego` policy file into a WASM bundle with
+/// the given entrypoints and include it.
+/// 
+/// It requires the `opa` binary to be installed and found.
+/// 
+/// The policy path must point to a `.rego` file relative to the
+/// package root (manifest directory).
+/// 
+/// **Entrypoints are not checked during compilation**.
+/// 
+/// # Example
+/// 
+/// ```rust,ignore
+/// let bundle = include_policy!{
+///     "./resources/policies/my-example-policy.rego" => [
+///         "example_policy.projects",
+///         "example_policy.users"
+///     ]
+/// };
+/// ```
+#[cfg(all(feature = "macros"))]
+#[doc(inline)]
+pub use opa_macros::include_wasm_policy as include_policy;
+
 #[derive(Default)]
 pub struct OpaBuilder {
     abort_cb: Option<Box<dyn Fn(&str) + Send + Sync>>,
@@ -47,6 +71,27 @@ impl OpaBuilder {
     pub fn with_engine(mut self, engine: Engine) -> Self {
         self.engine = engine;
         self
+    }
+
+    /// Build the OPA WASM instance from a module in a bundle.
+    ///
+    /// # Errors
+    ///
+    /// The bundle must contain at least one compiled WASM module.
+    /// The OPA module will be initialized with any error returned.
+    #[cfg(feature = "bundle")]
+    pub fn build_from_bundle(
+        self,
+        bundle: &crate::bundle::Bundle,
+    ) -> Result<Opa, anyhow::Error> {
+        self.build(
+            &bundle
+                .wasm_policies
+                .first()
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("the bundle must at least one WASM module"))?
+                .bytes,
+        )
     }
 
     /// Build the OPA WASM instance.
