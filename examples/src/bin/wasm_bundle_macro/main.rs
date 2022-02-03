@@ -1,13 +1,9 @@
-use opa::wasm::{include_policy, Opa};
+use opa::{wasm::Opa, include_policy};
 use serde_json::{json, Value};
 
 fn main() -> Result<(), anyhow::Error> {
-    let bundle = include_policy!(
-        "examples/example.rego" => [
-            "example.project_permissions"
-        ]
-    );
-
+    let bundle = include_policy!("example");
+ 
     let mut opa = Opa::new().build_from_bundle(&bundle)?;
 
     let data = json!({

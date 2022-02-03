@@ -3,8 +3,10 @@ use opa::{bundle::Bundle, wasm::Opa};
 use serde_json::{json, Value};
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let mut bundle =
-        Bundle::from_bytes(include_bytes!("../examples/wasm_bundle/example.tar.gz")).unwrap();
+    let mut bundle = Bundle::from_bytes(include_bytes!(
+        "../../../examples/src/bin/wasm_bundle/example.tar.gz"
+    ))
+    .unwrap();
 
     let mut opa = Opa::new()
         .build(bundle.wasm_policies.pop().unwrap().bytes)

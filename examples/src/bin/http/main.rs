@@ -24,7 +24,7 @@ impl PolicyDecision for ProjectPermissions {
 async fn main() -> Result<(), anyhow::Error> {
     let opa = Opa::new("http://localhost:8181")?;
 
-    opa.set_policy(Policy::new("example", include_str!("../example.rego")))
+    opa.set_policy(Policy::new("example", include_str!("../../../example.rego")))
         .await?;
 
     opa.set_document(

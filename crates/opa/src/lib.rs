@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "bundle")]
 pub mod bundle;
@@ -10,6 +10,9 @@ pub mod http;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+
+#[cfg(feature = "build")]
+pub mod build;
 
 /// A helper trait for defining strongly-typed input/decision pairs
 /// for given policies.
@@ -22,4 +25,37 @@ pub trait PolicyDecision {
 
     /// The output type expected to be returned by OPA.
     type Output: DeserializeOwned;
+}
+
+/// Include a bundle built at compile-time.
+///
+/// # Example
+///
+/// Build the policy with `opa`:
+///
+/// ```rust,ignore
+/// opa::build::policy("./example.rego", "example")
+///     .add_entrypoint("example.policy_entry_point")
+///     .compile()
+///     .unwrap();
+/// ```
+///
+/// Then include the bundle:
+/// 
+/// ```rust,ignore
+/// let bundle = include_policy!("example");
+/// ```
+/// 
+#[cfg(all(feature = "bundle", feature = "build"))]
+#[macro_export]
+macro_rules! include_policy {
+    ($name:literal) => {
+        $crate::bundle::Bundle::from_bytes(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/opa/",
+            $name,
+            ".tar.gz"
+        )))
+        .unwrap()
+    };
 }

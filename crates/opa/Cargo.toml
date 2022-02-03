@@ -1,6 +1,6 @@
 [package]
 name = "opa"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Unofficial SDK library for Open Policy Agent"
 repository = "https://github.com/tamasfe/opa-rs"
@@ -16,8 +16,6 @@ serde = { version = "1.0.133", features = ["derive"] }
 serde_json = "1.0.74"
 thiserror = "1.0.30"
 
-opa-macros = { version = "=0.1.0", path = "../opa-macros", optional = true }
-
 flate2 = { version = "1.0.22", optional = true }
 tar = { version = "0.4.38", optional = true }
 
@@ -25,33 +23,19 @@ reqwest = { version = "0.11.8", features = ["json"], optional = true }
 url = { version = "2.2.2", optional = true }
 uuid = { version = "0.8.2", features = ["serde"], optional = true }
 
-wasmtime = { version = "0.32.0", optional = true }
+wasmtime = { version = "0.33.0", optional = true }
+
+which = { version = "4.2.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.3.5"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = ["bundle"]
-bundle = [
-    "flate2",
-    "tar",
-]
+bundle = ["flate2", "tar"]
 http = ["reqwest", "url", "uuid"]
 wasm = ["wasmtime"]
-macros = ["opa-macros"]
-
-[[example]]
-name = "wasm_bundle"
-required-features = ["bundle", "wasm"]
-
-[[example]]
-name = "wasm_bundle_macro"
-required-features = ["bundle", "macros", "wasm"]
-
-[[example]]
-name = "http"
-required-features = ["http"]
+build = ["which"]
 
 [[bench]]
 name = "bench_wasm_eval"
