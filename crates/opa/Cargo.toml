@@ -1,6 +1,6 @@
 [package]
 name = "opa"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Unofficial SDK library for Open Policy Agent"
 repository = "https://github.com/tamasfe/opa-rs"
@@ -16,7 +16,7 @@ serde = { version = "1.0.133", features = ["derive"] }
 serde_json = "1.0.74"
 thiserror = "1.0.30"
 
-opa-macros = { version = "=0.1.0", path = "../opa-macros" }
+opa-macros = { version = "=0.1.0", path = "../opa-macros", optional = true }
 
 flate2 = { version = "1.0.22", optional = true }
 tar = { version = "0.4.38", optional = true }
@@ -32,14 +32,14 @@ criterion = "0.3.5"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
-default = ["bundle", "macros", "wasm"]
+default = ["bundle"]
 bundle = [
     "flate2",
     "tar",
 ]
 http = ["reqwest", "url", "uuid"]
 wasm = ["wasmtime"]
-macros = []
+macros = ["opa-macros"]
 
 [[example]]
 name = "wasm_bundle"
