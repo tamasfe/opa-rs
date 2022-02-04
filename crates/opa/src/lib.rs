@@ -34,8 +34,9 @@ pub trait PolicyDecision {
 /// Build the policy with `opa`:
 ///
 /// ```rust,ignore
-/// opa::build::policy("./example.rego", "example")
-///     .add_entrypoint("example.policy_entry_point")
+/// opa::build::policy("example")
+///     .add_source("./example.rego")
+///     .add_entrypoint("example.project_permissions")
 ///     .compile()
 ///     .unwrap();
 /// ```

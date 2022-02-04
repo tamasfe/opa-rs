@@ -3,7 +3,9 @@
 use crate::PolicyDecision;
 use anyhow::anyhow;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashMap, io::copy, string::String, sync::Arc};
+use std::{
+    borrow::Cow, collections::HashMap, io::copy, mem::ManuallyDrop, string::String, sync::Arc,
+};
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
 #[derive(Default)]
@@ -56,10 +58,7 @@ impl OpaBuilder {
     /// The bundle must contain at least one compiled WASM module.
     /// The OPA module will be initialized with any error returned.
     #[cfg(feature = "bundle")]
-    pub fn build_from_bundle(
-        self,
-        bundle: &crate::bundle::Bundle,
-    ) -> Result<Opa, anyhow::Error> {
+    pub fn build_from_bundle(self, bundle: &crate::bundle::Bundle) -> Result<Opa, anyhow::Error> {
         self.build(
             &bundle
                 .wasm_policies
@@ -213,70 +212,24 @@ impl Opa {
         I: Serialize,
         R: DeserializeOwned,
     {
-        #[derive(Deserialize)]
-        struct OpaOutput<R> {
-            result: R,
-        }
+        let mut ctx = EvalContext::create(self, input)?;
+        let res = ctx.eval(entrypoint)?;
+        ctx.destroy()?;
+        Ok(res)
+    }
 
-        let opa_eval_ctx_new = self
-            .instance
-            .get_typed_func::<(), u32, _>(&mut self.store, "opa_eval_ctx_new")?;
-        let opa_eval_ctx_set_input = self
-            .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut self.store, "opa_eval_ctx_set_input")?;
-        let opa_eval_ctx_set_data = self
-            .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut self.store, "opa_eval_ctx_set_data")?;
-        let opa_eval_ctx_set_entrypoint = self
-            .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut self.store, "opa_eval_ctx_set_entrypoint")?;
-        let opa_eval_ctx_get_result = self
-            .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "opa_eval_ctx_get_result")?;
-        let opa_eval = self
-            .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "eval")?; // does not start with opa_ on purpose
-
-        let entrypoint = if entrypoint.contains('.') {
-            Cow::Owned(entrypoint.replace('.', "/"))
-        } else {
-            Cow::Borrowed(entrypoint)
-        };
-
-        let entrypoint_id = self
-            .entrypoints
-            .get(entrypoint.as_ref())
-            .copied()
-            .ok_or_else(|| anyhow!("invalid entrypoint `{}`", &entrypoint))?;
-
-        let ctx_addr = opa_eval_ctx_new.call(&mut self.store, ())?;
-
-        let data_addr = self
-            .data_addr
-            .ok_or_else(|| anyhow!("no data provided, all decisions will return undefined"))?;
-        let input_addr = self.write_json(input)?;
-
-        opa_eval_ctx_set_input.call(&mut self.store, (ctx_addr, input_addr.into()))?;
-        opa_eval_ctx_set_data.call(&mut self.store, (ctx_addr, data_addr.into()))?;
-        opa_eval_ctx_set_entrypoint.call(&mut self.store, (ctx_addr, entrypoint_id))?;
-        opa_eval.call(&mut self.store, (ctx_addr,))?;
-
-        let result_addr = opa_eval_ctx_get_result.call(&mut self.store, (ctx_addr,))?;
-
-        // TODO: this will return an array of results (OpaOutput<_>)
-        //      I'm not sure about the reason for this, but for now we are only interested
-        //      in the first one.
-        let result: Result<Vec<OpaOutput<R>>, _> = self.json_at(result_addr.into());
-
-        self.free(result_addr.into())?;
-        self.free(input_addr)?;
-        self.free(ctx_addr.into())?;
-
-        result.and_then(|mut out| {
-            out.pop()
-                .map(|r| r.result)
-                .ok_or_else(|| anyhow!("the query produced no results"))
-        })
+    /// Create an evaluation context ([`EvalContext`]) with the given input.
+    ///
+    /// # Errors
+    ///
+    /// Data must be set at least once beforehand with [`Self::set_data`], otherwise evaluation will always fail.
+    ///
+    /// Internal WASM errors are also returned.
+    pub fn eval_context<'c>(
+        &'c mut self,
+        input: &impl Serialize,
+    ) -> Result<EvalContext<'c>, anyhow::Error> {
+        EvalContext::create(self, input)
     }
 
     /// Same as [`Self::eval`] with an alternative API.
@@ -374,6 +327,143 @@ impl Opa {
             .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_free")?;
         opa_free.call(&mut self.store, (addr.into(),))?;
         Ok(())
+    }
+}
+
+/// An evaluation context that allows evaluating multiple
+/// entrypoints multiple times with the same input.
+/// 
+/// # Remarks
+/// 
+/// The data of the context has to be freed after use,
+/// this can be done with the [`Self::destroy`] method.
+/// 
+/// Data is also freed on drop, but in this case the **context will panic on failure**.
+pub struct EvalContext<'c> {
+    opa: &'c mut Opa,
+    input_addr: Addr,
+    ctx_addr: Addr,
+}
+
+impl<'c> EvalContext<'c> {
+    fn create(opa: &'c mut Opa, input: &impl Serialize) -> Result<Self, anyhow::Error> {
+        let opa_eval_ctx_new = opa
+            .instance
+            .get_typed_func::<(), u32, _>(&mut opa.store, "opa_eval_ctx_new")?;
+        let opa_eval_ctx_set_input = opa
+            .instance
+            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_input")?;
+        let opa_eval_ctx_set_data = opa
+            .instance
+            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_data")?;
+
+        let data_addr = opa
+            .data_addr
+            .ok_or_else(|| anyhow!("no data provided, all decisions will return undefined"))?;
+        let input_addr = opa.write_json(input)?;
+
+        let ctx_addr = opa_eval_ctx_new.call(&mut opa.store, ())?;
+
+        opa_eval_ctx_set_input.call(&mut opa.store, (ctx_addr, input_addr.into()))?;
+        opa_eval_ctx_set_data.call(&mut opa.store, (ctx_addr, data_addr.into()))?;
+
+        Ok(EvalContext {
+            opa,
+            input_addr,
+            ctx_addr: ctx_addr.into(),
+        })
+    }
+
+    /// Evaluate a policy at the entrypoint.
+    ///
+    /// # Errors
+    ///
+    /// The entrypoint must exist.
+    ///
+    /// Deserialization errors and internal WASM errors are also returned.
+    pub fn eval<R>(&mut self, entrypoint: &str) -> Result<R, anyhow::Error>
+    where
+        R: DeserializeOwned,
+    {
+        #[derive(Deserialize)]
+        struct OpaOutput<R> {
+            result: R,
+        }
+
+        let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), (), _>(
+            &mut self.opa.store,
+            "opa_eval_ctx_set_entrypoint",
+        )?;
+
+        let opa_eval_ctx_get_result = self
+            .opa
+            .instance
+            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "opa_eval_ctx_get_result")?;
+        let opa_eval = self
+            .opa
+            .instance
+            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
+
+        let entrypoint = if entrypoint.contains('.') {
+            Cow::Owned(entrypoint.replace('.', "/"))
+        } else {
+            Cow::Borrowed(entrypoint)
+        };
+
+        let entrypoint_id = self
+            .opa
+            .entrypoints
+            .get(entrypoint.as_ref())
+            .copied()
+            .ok_or_else(|| anyhow!("invalid entrypoint `{}`", &entrypoint))?;
+
+        opa_eval_ctx_set_entrypoint
+            .call(&mut self.opa.store, (self.ctx_addr.into(), entrypoint_id))?;
+        opa_eval.call(&mut self.opa.store, (self.ctx_addr.into(),))?;
+
+        let result_addr =
+            opa_eval_ctx_get_result.call(&mut self.opa.store, (self.ctx_addr.into(),))?;
+
+        // TODO: this will return an array of results (OpaOutput<_>)
+        //      I'm not sure about the reason for this, but for now we are only interested
+        //      in the first one.
+        let result: Result<Vec<OpaOutput<R>>, _> = self.opa.json_at(result_addr.into());
+
+        self.opa.free(result_addr.into())?;
+
+        result.and_then(|mut out| {
+            out.pop()
+                .map(|r| r.result)
+                .ok_or_else(|| anyhow!("the query produced no results"))
+        })
+    }
+
+    /// Destroy and free the eval context.
+    ///
+    /// # Errors
+    ///
+    /// WASM and OPA errors are returned.
+    pub fn destroy(mut self) -> Result<(), anyhow::Error> {
+        self.destroy_mut()?;
+        let _ = ManuallyDrop::new(self);
+        Ok(())
+    }
+
+    fn destroy_mut(&mut self) -> Result<(), anyhow::Error> {
+        self.opa.free(self.input_addr)?;
+        self.opa.free(self.ctx_addr)?;
+        Ok(())
+    }
+}
+
+impl Drop for EvalContext<'_> {
+    fn drop(&mut self) {
+        if let Err(err) = self.destroy_mut() {
+            #[allow(clippy::manual_assert)]
+            if !std::thread::panicking() {
+                panic!("{err:?}");
+            }
+        }
     }
 }
 
