@@ -25,11 +25,13 @@ impl WasmPolicyBuilder {
         }
     }
 
+    #[must_use]
     pub fn add_entrypoint(mut self, ep: impl Into<String>) -> Self {
         self.entrypoints.push(ep.into());
         self
     }
 
+    #[must_use]
     pub fn add_entrypoints<S, I>(mut self, eps: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -39,11 +41,13 @@ impl WasmPolicyBuilder {
         self
     }
 
+    #[must_use]
     pub fn add_source(mut self, path: impl Into<String>) -> Self {
         self.paths.push(path.into());
         self
     }
 
+    #[must_use]
     pub fn add_sources<S, I>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -128,7 +132,7 @@ impl WasmPolicyBuilder {
 
         for entrypoint in self.entrypoints {
             opa_cmd.arg("-e");
-            opa_cmd.arg(&entrypoint.replace(".", "/"));
+            opa_cmd.arg(&entrypoint.replace('.', "/"));
         }
 
         for input_path in input_paths {
