@@ -143,7 +143,8 @@ impl WasmPolicyBuilder {
         let out = opa_cmd.output()?;
 
         if !out.status.success() {
-            let o = String::from_utf8(out.stdout).unwrap();
+            let o = String::from_utf8_lossy(&out.stdout).to_string()
+                + String::from_utf8_lossy(&out.stderr).as_ref();
             return Err(anyhow!("opa error: {o}"));
         }
 
