@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use std::{
     env, fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -14,6 +15,7 @@ pub struct WasmPolicyBuilder {
     name: String,
     paths: Vec<String>,
     entrypoints: Vec<String>,
+    opt_level: Option<NonZeroUsize>,
 }
 
 impl WasmPolicyBuilder {
@@ -22,6 +24,7 @@ impl WasmPolicyBuilder {
             name: name.into(),
             paths: Vec::default(),
             entrypoints: Vec::default(),
+            opt_level: None,
         }
     }
 
@@ -54,6 +57,18 @@ impl WasmPolicyBuilder {
         S: Into<String>,
     {
         self.paths.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn opt_level(mut self, level: usize) -> Self {
+        if level == 0 {
+            self.opt_level = None;
+        } else {
+            self.opt_level = Some(level.try_into().unwrap());
+        }
+
         self
     }
 
@@ -124,11 +139,14 @@ impl WasmPolicyBuilder {
             "build",
             "-t",
             "wasm",
-            "-O",
-            "1",
             "-o",
             output_file_path.to_str().unwrap(),
         ]);
+
+        if let Some(opt) = self.opt_level {
+            opa_cmd.arg("-O");
+            opa_cmd.arg(opt.to_string());
+        }
 
         for entrypoint in self.entrypoints {
             opa_cmd.arg("-e");
