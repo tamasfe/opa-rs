@@ -40,6 +40,21 @@ fn criterion_benchmark(c: &mut Criterion) {
                 .unwrap()
         })
     });
+
+    c.bench_function("eval_with_context", |b| {
+        b.iter(|| {
+            opa.eval_context(black_box(&input))
+                .unwrap()
+                .eval::<Value>(black_box("example.project_permissions"))
+                .unwrap()
+        })
+    });
+
+    let mut eval_ctx = opa.eval_context(black_box(&input)).unwrap();
+
+    c.bench_function("eval_with_context_reuse", |b| {
+        b.iter(|| eval_ctx.eval::<Value>(black_box("example.project_permissions")))
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

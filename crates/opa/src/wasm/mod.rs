@@ -148,7 +148,10 @@ impl OpaBuilder {
             instance,
             env_buffer,
             entrypoints: HashMap::default(),
+            data_heap_ptr: Addr(0),
             data_addr: None,
+            input_heap_ptr: Addr(0),
+            minor_version: 0,
         };
 
         opa.init()?;
@@ -162,9 +165,14 @@ pub struct Opa {
     store: Store<()>,
     instance: Instance,
     env_buffer: Memory,
+
+    minor_version: usize,
+
     entrypoints: HashMap<String, u32>,
 
+    data_heap_ptr: Addr,
     data_addr: Option<Addr>,
+    input_heap_ptr: Addr,
 }
 
 impl Opa {
@@ -189,11 +197,10 @@ impl Opa {
     ///
     /// Internal WASM errors are returned.
     pub fn set_data(&mut self, data: &impl Serialize) -> Result<(), anyhow::Error> {
-        if let Some(addr) = self.data_addr.take() {
-            self.free(addr)?;
-        }
+        self.set_heap_ptr(self.data_heap_ptr)?;
 
         self.data_addr = Some(self.write_json(data)?);
+        self.input_heap_ptr = self.heap_ptr()?;
 
         Ok(())
     }
@@ -207,11 +214,15 @@ impl Opa {
     /// Data must be set at least once beforehand with [`Self::set_data`], otherwise evaluation will always fail.
     ///
     /// Internal WASM errors are also returned.
-    pub fn eval<I, R>(&mut self, entrypoint: &str, input: &I) -> Result<R, anyhow::Error>
+    pub fn eval<I, O>(&mut self, entrypoint: &str, input: &I) -> Result<O, anyhow::Error>
     where
         I: Serialize,
-        R: DeserializeOwned,
+        O: DeserializeOwned,
     {
+        if self.minor_version >= 2 {
+            return self.eval_once(entrypoint, input);
+        }
+
         let mut ctx = EvalContext::create(self, input)?;
         let res = ctx.eval(entrypoint)?;
         ctx.destroy()?;
@@ -251,11 +262,21 @@ impl Opa {
 
 impl Opa {
     fn init(&mut self) -> Result<(), anyhow::Error> {
+        self.data_heap_ptr = self.heap_ptr()?;
+        self.input_heap_ptr = self.data_heap_ptr;
+
         let opa_entrypoints = self
             .instance
             .get_typed_func::<(), u32, _>(&mut self.store, "entrypoints")?;
         let ep_addr = opa_entrypoints.call(&mut self.store, ())?;
         self.entrypoints = self.json_at(ep_addr.into())?;
+
+        self.minor_version = self
+            .instance
+            .get_global(&mut self.store, "opa_wasm_abi_minor_version")
+            .and_then(|global| global.get(&mut self.store).i32())
+            .and_then(|int| int.try_into().ok())
+            .unwrap_or(0);
 
         Ok(())
     }
@@ -278,7 +299,6 @@ impl Opa {
 
         let json_addr: Addr = opa_json_dump.call(&mut self.store, (addr.into(),))?.into();
         let json_result = serde_json::from_slice::<T>(self.bytes_at(json_addr).unwrap());
-        self.free(json_addr)?;
 
         Ok(json_result?)
     }
@@ -291,13 +311,12 @@ impl Opa {
         let json = serde_json::to_vec(value)?;
         let json_size = json.len();
 
-        let json_addr = self.write_bytes(json)?;
+        let json_bytes_addr = self.write_bytes(json)?;
 
-        let addr = opa_json_parse.call(&mut self.store, (json_addr.into(), json_size as _))?;
+        let parsed_json_addr =
+            opa_json_parse.call(&mut self.store, (json_bytes_addr.into(), json_size as _))?;
 
-        self.free(json_addr)?;
-
-        Ok(addr.into())
+        Ok(parsed_json_addr.into())
     }
 
     fn write_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<Addr, anyhow::Error> {
@@ -321,6 +340,11 @@ impl Opa {
         Ok((addr.into(), data))
     }
 
+    // We manually reset the heap pointer, so this is not needed.
+    //
+    // It would be useful for the `opa_value_*` that is not used
+    // by this implementation right now.
+    #[allow(dead_code)]
     fn free(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
         let opa_free = self
             .instance
@@ -328,20 +352,112 @@ impl Opa {
         opa_free.call(&mut self.store, (addr.into(),))?;
         Ok(())
     }
+
+    fn eval_once<I, O>(&mut self, entrypoint: &str, input: &I) -> Result<O, anyhow::Error>
+    where
+        I: Serialize,
+        O: DeserializeOwned,
+    {
+        let opa_eval = self.instance.get_typed_func::<(
+            u32, // reserved
+            u32, // entrypoint_id
+            u32, // parsed data addr
+            u32, // input json str addr
+            u32, // input length
+            u32, // heap_ptr
+            u32, // format
+        ), u32, _>(&mut self.store, "opa_eval")?;
+
+        let data_addr = self.data_addr.ok_or_else(|| {
+            anyhow!("no data provided, `set_data` must be called at least once first")
+        })?;
+
+        let input_bytes = serde_json::to_vec(input)?;
+        let input_idx = self.input_heap_ptr.0 as usize;
+
+        let input_len = u32::try_from(input_bytes.len())
+            .map_err(|err| anyhow::anyhow!("input data is too large: {err}"))?;
+
+        if self.env_buffer.data_size(&mut self.store) < input_idx + input_bytes.len() {
+            let delta = round_up(
+                input_idx + input_bytes.len() - self.env_buffer.data_size(&mut self.store),
+            );
+
+            self.env_buffer.grow(&mut self.store, delta as _)?;
+        }
+
+        let data = self.env_buffer.data_mut(&mut self.store);
+        copy(&mut &*input_bytes, &mut &mut data[input_idx..])?;
+
+        let entrypoint = self.entrypoint_id(entrypoint)?;
+
+        let out_addr = opa_eval.call(
+            &mut self.store,
+            (
+                0,
+                entrypoint,
+                data_addr.into(),
+                self.input_heap_ptr.0,
+                input_len,
+                u32::from(self.input_heap_ptr) + input_len,
+                0,
+            ),
+        )?;
+
+        let mut out: Vec<OpaOutput<O>> = serde_json::from_slice(
+            self.bytes_at(Addr(out_addr))
+                .ok_or_else(|| anyhow::anyhow!("invalid output returned from evaluation"))?,
+        )?;
+
+        self.set_heap_ptr(self.input_heap_ptr)?;
+
+        out.pop()
+            .map(|v| v.result)
+            .ok_or_else(|| anyhow::anyhow!("evaluation yielded no result (it's most likely a bug)"))
+    }
+
+    fn heap_ptr(&mut self) -> Result<Addr, anyhow::Error> {
+        let opa_heap_ptr_get = self
+            .instance
+            .get_typed_func::<(), u32, _>(&mut self.store, "opa_heap_ptr_get")?;
+
+        Ok(Addr(opa_heap_ptr_get.call(&mut self.store, ())?))
+    }
+
+    fn set_heap_ptr(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
+        let opa_heap_ptr_set = self
+            .instance
+            .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_heap_ptr_set")?;
+
+        opa_heap_ptr_set.call(&mut self.store, (addr.into(),))?;
+        Ok(())
+    }
+
+    fn entrypoint_id(&mut self, entrypoint: &str) -> Result<u32, anyhow::Error> {
+        let entrypoint = if entrypoint.contains('.') {
+            Cow::Owned(entrypoint.replace('.', "/"))
+        } else {
+            Cow::Borrowed(entrypoint)
+        };
+
+        self.entrypoints
+            .get(entrypoint.as_ref())
+            .copied()
+            .ok_or_else(|| anyhow!("invalid entrypoint `{}`", &entrypoint))
+    }
 }
 
 /// An evaluation context that allows evaluating multiple
 /// entrypoints multiple times with the same input.
-/// 
+///
 /// # Remarks
-/// 
-/// The data of the context has to be freed after use,
+///
+/// The input data and the context has to be freed after use,
 /// this can be done with the [`Self::destroy`] method.
-/// 
+///
 /// Data is also freed on drop, but in this case the **context will panic on failure**.
 pub struct EvalContext<'c> {
     opa: &'c mut Opa,
-    input_addr: Addr,
     ctx_addr: Addr,
 }
 
@@ -357,19 +473,20 @@ impl<'c> EvalContext<'c> {
             .instance
             .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_data")?;
 
-        let data_addr = opa
-            .data_addr
-            .ok_or_else(|| anyhow!("no data provided, all decisions will return undefined"))?;
+        opa.set_heap_ptr(opa.input_heap_ptr)?;
+
+        let data_addr = opa.data_addr.ok_or_else(|| {
+            anyhow!("no data provided, `set_data` must be called at least once first")
+        })?;
         let input_addr = opa.write_json(input)?;
 
         let ctx_addr = opa_eval_ctx_new.call(&mut opa.store, ())?;
 
-        opa_eval_ctx_set_input.call(&mut opa.store, (ctx_addr, input_addr.into()))?;
         opa_eval_ctx_set_data.call(&mut opa.store, (ctx_addr, data_addr.into()))?;
+        opa_eval_ctx_set_input.call(&mut opa.store, (ctx_addr, input_addr.into()))?;
 
         Ok(EvalContext {
             opa,
-            input_addr,
             ctx_addr: ctx_addr.into(),
         })
     }
@@ -381,15 +498,10 @@ impl<'c> EvalContext<'c> {
     /// The entrypoint must exist.
     ///
     /// Deserialization errors and internal WASM errors are also returned.
-    pub fn eval<R>(&mut self, entrypoint: &str) -> Result<R, anyhow::Error>
+    pub fn eval<O>(&mut self, entrypoint: &str) -> Result<O, anyhow::Error>
     where
-        R: DeserializeOwned,
+        O: DeserializeOwned,
     {
-        #[derive(Deserialize)]
-        struct OpaOutput<R> {
-            result: R,
-        }
-
         let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), (), _>(
             &mut self.opa.store,
             "opa_eval_ctx_set_entrypoint",
@@ -404,21 +516,13 @@ impl<'c> EvalContext<'c> {
             .instance
             .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
 
-        let entrypoint = if entrypoint.contains('.') {
-            Cow::Owned(entrypoint.replace('.', "/"))
-        } else {
-            Cow::Borrowed(entrypoint)
-        };
-
-        let entrypoint_id = self
-            .opa
-            .entrypoints
-            .get(entrypoint.as_ref())
-            .copied()
-            .ok_or_else(|| anyhow!("invalid entrypoint `{}`", &entrypoint))?;
+        let entrypoint_id = self.opa.entrypoint_id(entrypoint)?;
 
         opa_eval_ctx_set_entrypoint
             .call(&mut self.opa.store, (self.ctx_addr.into(), entrypoint_id))?;
+
+        let start_heap = self.opa.heap_ptr()?;
+
         opa_eval.call(&mut self.opa.store, (self.ctx_addr.into(),))?;
 
         let result_addr =
@@ -427,9 +531,9 @@ impl<'c> EvalContext<'c> {
         // TODO: this will return an array of results (OpaOutput<_>)
         //      I'm not sure about the reason for this, but for now we are only interested
         //      in the first one.
-        let result: Result<Vec<OpaOutput<R>>, _> = self.opa.json_at(result_addr.into());
+        let result: Result<Vec<OpaOutput<O>>, _> = self.opa.json_at(result_addr.into());
 
-        self.opa.free(result_addr.into())?;
+        self.opa.set_heap_ptr(start_heap)?;
 
         result.and_then(|mut out| {
             out.pop()
@@ -450,8 +554,7 @@ impl<'c> EvalContext<'c> {
     }
 
     fn destroy_mut(&mut self) -> Result<(), anyhow::Error> {
-        self.opa.free(self.input_addr)?;
-        self.opa.free(self.ctx_addr)?;
+        self.opa.set_heap_ptr(self.opa.input_heap_ptr)?;
         Ok(())
     }
 }
@@ -512,4 +615,14 @@ fn default_opa_abort(error: &str) {
 
 fn default_opa_println(value: &str) {
     println!("{}", value);
+}
+
+#[derive(Deserialize)]
+struct OpaOutput<R> {
+    result: R,
+}
+
+fn round_up(bytes: usize) -> usize {
+    const PAGE_SIZE: usize = 64 * 1024;
+    bytes / PAGE_SIZE + usize::from(bytes % PAGE_SIZE != 0)
 }

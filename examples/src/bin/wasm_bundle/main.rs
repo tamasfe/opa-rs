@@ -32,9 +32,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     opa.set_data(&data)?;
-
     let results: Value = opa.eval("example.project_permissions", &input)?;
-
     println!("{}", results);
 
     Ok(())
