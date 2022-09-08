@@ -8,10 +8,12 @@ use std::{
 };
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
+type StrHandler = Box<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Default)]
 pub struct OpaBuilder {
-    abort_cb: Option<Box<dyn Fn(&str) + Send + Sync>>,
-    println_cb: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    abort_cb: Option<StrHandler>,
+    println_cb: Option<StrHandler>,
     buffer_max_mem_pages: Option<u32>,
     engine: Engine,
 }
@@ -59,24 +61,51 @@ impl OpaBuilder {
     /// The OPA module will be initialized with any error returned.
     #[cfg(feature = "bundle")]
     pub fn build_from_bundle(self, bundle: &crate::bundle::Bundle) -> Result<Opa, anyhow::Error> {
-        self.build(
-            &bundle
-                .wasm_policies
-                .first()
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("the bundle must at least one WASM module"))?
-                .bytes,
-        )
+        #[cfg(feature = "wasmtime-aot")]
+        {
+            match &bundle.wasmtime_bytes {
+                Some(b) => {
+                    // SAFETY: The bytes can be provided via
+                    // an unsafe function for a bundle, if that
+                    // is safe, this is safe as well.
+                    let module = unsafe { Module::deserialize(&self.engine, b)? };
+                    return self.build_module(module);
+                }
+                None => {}
+            }
+        }
+
+
+        #[cfg(feature = "wasmtime-cranelift")]
+        {
+            return self.build(
+                &bundle
+                    .wasm_policies
+                    .first()
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("the bundle must at least one WASM module"))?
+                    .bytes,
+            );
+        }
+
+        #[allow(unreachable_code)]
+        Err(anyhow!("the bundle contains no precompiled WASM binary."))
     }
 
-    /// Build the OPA WASM instance.
+    /// Build the OPA WASM instance with the given WASM bytecode.
     ///
     /// # Errors
     ///
     /// The OPA module will be initialized with any error returned.
+    #[cfg(feature = "wasmtime-cranelift")]
     pub fn build(self, wasm_bytes: impl AsRef<[u8]>) -> Result<Opa, anyhow::Error> {
+        let m = Module::from_binary(&self.engine, wasm_bytes.as_ref())?;
+        self.build_module(m)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn build_module(self, module: Module) -> Result<Opa, anyhow::Error> {
         let engine = self.engine;
-        let module = Module::from_binary(&engine, wasm_bytes.as_ref())?;
         let mut linker = Linker::<()>::new(&engine);
         let mut store = Store::new(&engine, ());
         let env_buffer = Memory::new(&mut store, MemoryType::new(2, self.buffer_max_mem_pages))?;

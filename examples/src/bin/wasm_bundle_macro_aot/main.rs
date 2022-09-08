@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use opa::{include_policy, wasm::Opa};
+use opa::{wasm::Opa, include_policy};
 use serde_json::{json, Value};
 
 fn main() -> Result<(), anyhow::Error> {
-    let bundle = include_policy!("example");
+    let bundle = include_policy!("example-aot");
 
     let start = Instant::now();
-
+ 
     let mut opa = Opa::new().build_from_bundle(&bundle)?;
 
     let data = json!({
@@ -40,7 +40,7 @@ fn main() -> Result<(), anyhow::Error> {
     let results: Value = opa.eval("example.project_permissions", &input)?;
 
     println!("{}", results);
-    println!("{:.4}s", Instant::now().duration_since(start).as_secs_f64());
+    println!("{:.4}", Instant::now().duration_since(start).as_secs_f64());
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 [package]
 name = "opa"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 description = "Unofficial SDK library for Open Policy Agent"
 repository = "https://github.com/tamasfe/opa-rs"
@@ -23,26 +23,28 @@ reqwest = { version = "0.11.8", features = ["json"], optional = true }
 url = { version = "2.2.2", optional = true }
 uuid = { version = ">=0.8.2", features = ["serde"], optional = true }
 
-wasmtime = { version = "0.36.0", optional = true, default-features = false }
+wasmtime = { version = "0.40.1", optional = true, default-features = false }
 
 which = { version = "4.2.4", optional = true }
 walkdir = { version = "2.3.2", optional = true }
+tempfile = { version = "3.3.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.3.5"
 
 [features]
 default = ["bundle"]
-bundle = ["flate2", "tar"]
-http = ["reqwest", "url", "uuid"]
-wasm = ["wasmtime", "wasmtime/cranelift"]
-build = ["which", "walkdir"]
+bundle = ["dep:flate2", "dep:tar"]
+http = ["dep:reqwest", "dep:url", "dep:uuid"]
+wasmtime-cranelift = ["dep:wasmtime", "wasmtime?/cranelift"]
+wasmtime-aot = ["bundle", "dep:wasmtime"]
+build = ["dep:which", "dep:walkdir", "dep:tempfile"]
 
 [[bench]]
 name = "bench_wasm_eval"
-required-features = ["bundle", "wasm"]
+required-features = ["bundle", "wasmtime-cranelift"]
 harness = false
 
 [[test]]
 name = "wasm"
-required-features = ["bundle", "wasm"]
+required-features = ["bundle", "wasmtime-cranelift"]

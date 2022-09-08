@@ -26,10 +26,13 @@ pub struct Bundle {
     pub rego_policies: HashMap<PathBuf, String>,
 
     /// All WASM module policies within the bundle.
-    /// 
+    ///
     /// A WASM module policy should appear here
     /// only if it was listed in the manifest.
     pub wasm_policies: Vec<WasmPolicy>,
+
+    #[cfg(feature = "wasmtime-aot")]
+    pub(crate) wasmtime_bytes: Option<Bytes>,
 }
 
 impl Bundle {
@@ -117,7 +120,19 @@ impl Bundle {
             data,
             rego_policies,
             wasm_policies,
+            #[cfg(feature = "wasmtime-aot")]
+            wasmtime_bytes: None,
         })
+    }
+
+    // Set a precompiled WASM module for the bundle, intended
+    // for precompiled bundles from the build script.
+    //
+    // [`wasmtime::Module::deserialize`]
+    #[cfg(feature = "wasmtime-aot")]
+    #[doc(hidden)]
+    pub unsafe fn set_wasmtime_bytes(&mut self, bytes: Bytes) {
+        self.wasmtime_bytes = Some(bytes);
     }
 }
 

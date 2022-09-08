@@ -1,14 +1,23 @@
 use anyhow::anyhow;
 use std::{
     env, fs,
+    io::Write,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
 };
 use which::which;
 
+use crate::bundle::Bundle;
+
 pub fn policy(name: impl Into<String>) -> WasmPolicyBuilder {
     WasmPolicyBuilder::new(name)
+}
+
+#[cfg(feature = "wasmtime-aot")]
+#[derive(Default)]
+struct WasmTimeAotOptions {
+    enabled: bool,
 }
 
 pub struct WasmPolicyBuilder {
@@ -16,6 +25,8 @@ pub struct WasmPolicyBuilder {
     paths: Vec<String>,
     entrypoints: Vec<String>,
     opt_level: Option<NonZeroUsize>,
+    #[cfg(feature = "wasmtime-aot")]
+    aot: WasmTimeAotOptions,
 }
 
 impl WasmPolicyBuilder {
@@ -25,7 +36,17 @@ impl WasmPolicyBuilder {
             paths: Vec::default(),
             entrypoints: Vec::default(),
             opt_level: None,
+            #[cfg(feature = "wasmtime-aot")]
+            aot: WasmTimeAotOptions::default(),
         }
+    }
+
+    /// Precompile the WASM module using an installed `wasmtime` executable.
+    #[cfg(feature = "wasmtime-aot")]
+    #[must_use]
+    pub fn precompile_wasm(mut self, compile: bool) -> Self {
+        self.aot.enabled = compile;
+        self
     }
 
     #[must_use]
@@ -164,6 +185,44 @@ impl WasmPolicyBuilder {
             let o = String::from_utf8_lossy(&out.stdout).to_string()
                 + String::from_utf8_lossy(&out.stderr).as_ref();
             return Err(anyhow!("opa error: {o}"));
+        }
+
+        #[cfg(feature = "wasmtime-aot")]
+        {
+            let cwasm_output_path = out_dir.join(&format!("{output_file_name}.cwasm"));
+
+            if self.aot.enabled {
+                let mut bundle = Bundle::from_file(&output_file_path).unwrap();
+
+                let mut f = tempfile::NamedTempFile::new().unwrap();
+
+                f.write_all(&bundle.wasm_policies.pop().unwrap().bytes)
+                    .unwrap();
+
+                let p = f.into_temp_path();
+
+                let wasmtime_executable = which("wasmtime")?;
+
+                let mut wasmtime_cmd = Command::new(&wasmtime_executable);
+
+                wasmtime_cmd.args([
+                    "compile",
+                    "-o",
+                    cwasm_output_path.to_str().unwrap(),
+                    p.to_str().unwrap(),
+                ]);
+
+                let out = wasmtime_cmd.output()?;
+
+                if !out.status.success() {
+                    let o = String::from_utf8_lossy(&out.stdout).to_string()
+                        + String::from_utf8_lossy(&out.stderr).as_ref();
+                    return Err(anyhow!("wasmtime error: {o}"));
+                }
+            } else {
+                // Still create the file as the `include_policy!` macro expects it:
+                std::fs::File::create(cwasm_output_path).unwrap();
+            }
         }
 
         Ok(())
