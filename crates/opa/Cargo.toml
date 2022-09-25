@@ -1,6 +1,6 @@
 [package]
 name = "opa"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Unofficial SDK library for Open Policy Agent"
 repository = "https://github.com/tamasfe/opa-rs"
