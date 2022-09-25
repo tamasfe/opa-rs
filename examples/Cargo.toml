@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow = "1.0.53"
 opa = { path = "../crates/opa", features = [
+    "build",
     "bundle",
     "wasmtime-aot",
     "wasmtime-cranelift",
