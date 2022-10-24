@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+### Miscellaneous
+
+- Updated wasmtime to `2.0.0`.
+
 ## 0.7.0
 
 ### Miscellaneous
