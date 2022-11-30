@@ -59,13 +59,7 @@ macro_rules! include_policy {
         )))
         .unwrap();
 
-        // SAFETY: The WASM module was compiled by
-        // this library, so it is correct.
-        let b = include_bytes!(concat!(env!("OUT_DIR"), "/opa/", $name, ".cwasm"));
-
-        if !b.is_empty() {
-            $crate::include_aot!(bundle, b);
-        }
+        $crate::include_aot!($name, bundle);
 
         bundle
     }};
@@ -80,8 +74,14 @@ pub mod private {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! include_aot {
-    ($bundle:ident, $bytes:ident) => {
-        unsafe { $bundle.set_wasmtime_bytes($crate::private::bytes::Bytes::from(&$bytes[..])) }
+    ($name:literal, $bundle:ident) => {
+        let b = include_bytes!(concat!(env!("OUT_DIR"), "/opa/", $name, ".cwasm"));
+        
+        if !b.is_empty() {
+            // SAFETY: The WASM module was compiled by
+            // this library in a build script, so it is correct.
+            unsafe { $bundle.set_wasmtime_bytes($crate::private::bytes::Bytes::from(&b[..])) }
+        }
     };
 }
 
@@ -89,5 +89,5 @@ macro_rules! include_aot {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! include_aot {
-    ($bundle:ident, $bytes:ident) => {};
+    ($name:literal, $bundle:ident) => {};
 }

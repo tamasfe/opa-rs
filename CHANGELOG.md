@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+
+- Added the feature to compile and use Cranelift for AOT in build scripts.
+
+### Miscellaneous
+
+- Updated wasmtime to `3.0.0`
+
 ## 0.8.0
 
 ### Miscellaneous

@@ -14,10 +14,32 @@ pub fn policy(name: impl Into<String>) -> WasmPolicyBuilder {
     WasmPolicyBuilder::new(name)
 }
 
+/// Specify how the WASM module should be precompiled.
+#[derive(Clone, Copy)]
+pub enum AotMode {
+    /// Use a `wasmtime` executable to compile the module.
+    ///
+    /// It needs to be installed and accessible in the path,
+    /// moreover it should be the same version as `wasmtime`
+    /// library.
+    Executable,
+    /// Build and use cranelift to compile the WASM module.
+    #[cfg(feature = "wasmtime-cranelift")]
+    Cranelift,
+    /// Do not precompile WASM in the bundle.
+    None,
+}
+
+impl Default for AotMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 #[cfg(feature = "wasmtime-aot")]
 #[derive(Default)]
 struct WasmTimeAotOptions {
-    enabled: bool,
+    mode: AotMode,
 }
 
 pub struct WasmPolicyBuilder {
@@ -44,8 +66,8 @@ impl WasmPolicyBuilder {
     /// Precompile the WASM module using an installed `wasmtime` executable.
     #[cfg(feature = "wasmtime-aot")]
     #[must_use]
-    pub fn precompile_wasm(mut self, compile: bool) -> Self {
-        self.aot.enabled = compile;
+    pub fn precompile_wasm(mut self, mode: AotMode) -> Self {
+        self.aot.mode = mode;
         self
     }
 
@@ -98,7 +120,7 @@ impl WasmPolicyBuilder {
     /// # Errors
     ///
     /// The `opa` binary must be found in any of the system paths.
-    #[allow(clippy::missing_panics_doc)]
+    #[allow(clippy::missing_panics_doc, clippy::too_many_lines)]
     pub fn compile(self) -> Result<(), anyhow::Error> {
         if self.paths.is_empty() {
             return Err(anyhow!("no sources provided"));
@@ -189,39 +211,52 @@ impl WasmPolicyBuilder {
 
         #[cfg(feature = "wasmtime-aot")]
         {
-            let cwasm_output_path = out_dir.join(&format!("{output_file_name}.cwasm"));
+            let cwasm_output_path = out_dir.join(format!("{output_file_name}.cwasm"));
 
-            if self.aot.enabled {
-                let mut bundle = Bundle::from_file(&output_file_path).unwrap();
+            match self.aot.mode {
+                AotMode::Executable => {
+                    let mut bundle = Bundle::from_file(&output_file_path).unwrap();
 
-                let mut f = tempfile::NamedTempFile::new().unwrap();
+                    let mut f = tempfile::NamedTempFile::new().unwrap();
 
-                f.write_all(&bundle.wasm_policies.pop().unwrap().bytes)
-                    .unwrap();
+                    f.write_all(&bundle.wasm_policies.pop().unwrap().bytes)
+                        .unwrap();
 
-                let p = f.into_temp_path();
+                    let p = f.into_temp_path();
 
-                let wasmtime_executable = which("wasmtime")?;
+                    let wasmtime_executable = which("wasmtime")?;
 
-                let mut wasmtime_cmd = Command::new(&wasmtime_executable);
+                    let mut wasmtime_cmd = Command::new(wasmtime_executable);
 
-                wasmtime_cmd.args([
-                    "compile",
-                    "-o",
-                    cwasm_output_path.to_str().unwrap(),
-                    p.to_str().unwrap(),
-                ]);
+                    wasmtime_cmd.args([
+                        "compile",
+                        "-o",
+                        cwasm_output_path.to_str().unwrap(),
+                        p.to_str().unwrap(),
+                    ]);
 
-                let out = wasmtime_cmd.output()?;
+                    let out = wasmtime_cmd.output()?;
 
-                if !out.status.success() {
-                    let o = String::from_utf8_lossy(&out.stdout).to_string()
-                        + String::from_utf8_lossy(&out.stderr).as_ref();
-                    return Err(anyhow!("wasmtime error: {o}"));
+                    if !out.status.success() {
+                        let o = String::from_utf8_lossy(&out.stdout).to_string()
+                            + String::from_utf8_lossy(&out.stderr).as_ref();
+                        return Err(anyhow!("wasmtime error: {o}"));
+                    }
                 }
-            } else {
-                // Still create the file as the `include_policy!` macro expects it:
-                std::fs::File::create(cwasm_output_path).unwrap();
+                #[cfg(feature = "wasmtime-cranelift")]
+                AotMode::Cranelift => {
+                    let mut bundle = Bundle::from_file(&output_file_path)?;
+                    let engine = wasmtime::Engine::new(
+                        wasmtime::Config::default()
+                            .cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize),
+                    )?;
+                    let m = engine.precompile_module(&bundle.wasm_policies.pop().unwrap().bytes)?;
+                    std::fs::write(cwasm_output_path, m)?;
+                }
+                AotMode::None => {
+                    // Still create the file as the `include_policy!` macro expects it:
+                    std::fs::File::create(cwasm_output_path).unwrap();
+                }
             }
         }
 

@@ -639,11 +639,11 @@ fn null_terminated_str(slice: &[u8]) -> Option<&str> {
 }
 
 fn default_opa_abort(error: &str) {
-    panic!("OPA abort was called: {}", error);
+    panic!("OPA abort was called: {error}");
 }
 
 fn default_opa_println(value: &str) {
-    println!("{}", value);
+    println!("{value}");
 }
 
 #[derive(Deserialize)]

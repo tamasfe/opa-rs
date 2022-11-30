@@ -4,7 +4,7 @@ fn main() {
         .add_source("./example2.rego")
         .add_entrypoint("example.project_permissions")
         .add_entrypoint("example2.project_permissions2")
-        .precompile_wasm(true)
+        .precompile_wasm(opa::build::AotMode::Cranelift)
         .compile()
         .unwrap();
 
