@@ -119,7 +119,7 @@ impl OpaBuilder {
             .unwrap_or_else(|| Box::new(default_opa_println));
 
         // https://www.openpolicyagent.org/docs/latest/wasm/#memory-buffer
-        linker.define("env", "memory", env_buffer)?;
+        linker.define(&mut store, "env", "memory", env_buffer)?;
 
         // https://www.openpolicyagent.org/docs/latest/wasm/#imports
         linker.func_wrap(
@@ -296,7 +296,7 @@ impl Opa {
 
         let opa_entrypoints = self
             .instance
-            .get_typed_func::<(), u32, _>(&mut self.store, "entrypoints")?;
+            .get_typed_func::<(), u32>(&mut self.store, "entrypoints")?;
         let ep_addr = opa_entrypoints.call(&mut self.store, ())?;
         self.entrypoints = self.json_at(ep_addr.into())?;
 
@@ -324,7 +324,7 @@ impl Opa {
     fn json_at<T: DeserializeOwned>(&mut self, addr: Addr) -> Result<T, anyhow::Error> {
         let opa_json_dump = self
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "opa_json_dump")?;
+            .get_typed_func::<(u32,), u32>(&mut self.store, "opa_json_dump")?;
 
         let json_addr: Addr = opa_json_dump.call(&mut self.store, (addr.into(),))?.into();
         let json_result = serde_json::from_slice::<T>(self.bytes_at(json_addr).unwrap());
@@ -335,7 +335,7 @@ impl Opa {
     fn write_json(&mut self, value: &impl Serialize) -> Result<Addr, anyhow::Error> {
         let opa_json_parse = self
             .instance
-            .get_typed_func::<(u32, u32), u32, _>(&mut self.store, "opa_json_parse")?;
+            .get_typed_func::<(u32, u32), u32>(&mut self.store, "opa_json_parse")?;
 
         let json = serde_json::to_vec(value)?;
         let json_size = json.len();
@@ -360,7 +360,7 @@ impl Opa {
     fn alloc(&mut self, len: usize) -> Result<(Addr, &mut [u8]), anyhow::Error> {
         let opa_malloc = self
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "opa_malloc")?;
+            .get_typed_func::<(u32,), u32>(&mut self.store, "opa_malloc")?;
 
         let addr = opa_malloc.call(&mut self.store, (len as _,))?;
         let data =
@@ -377,7 +377,7 @@ impl Opa {
     fn free(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
         let opa_free = self
             .instance
-            .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_free")?;
+            .get_typed_func::<(u32,), ()>(&mut self.store, "opa_free")?;
         opa_free.call(&mut self.store, (addr.into(),))?;
         Ok(())
     }
@@ -395,7 +395,7 @@ impl Opa {
             u32, // input length
             u32, // heap_ptr
             u32, // format
-        ), u32, _>(&mut self.store, "opa_eval")?;
+        ), u32>(&mut self.store, "opa_eval")?;
 
         let data_addr = self.data_addr.ok_or_else(|| {
             anyhow!("no data provided, `set_data` must be called at least once first")
@@ -448,7 +448,7 @@ impl Opa {
     fn heap_ptr(&mut self) -> Result<Addr, anyhow::Error> {
         let opa_heap_ptr_get = self
             .instance
-            .get_typed_func::<(), u32, _>(&mut self.store, "opa_heap_ptr_get")?;
+            .get_typed_func::<(), u32>(&mut self.store, "opa_heap_ptr_get")?;
 
         Ok(Addr(opa_heap_ptr_get.call(&mut self.store, ())?))
     }
@@ -456,7 +456,7 @@ impl Opa {
     fn set_heap_ptr(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
         let opa_heap_ptr_set = self
             .instance
-            .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_heap_ptr_set")?;
+            .get_typed_func::<(u32,), ()>(&mut self.store, "opa_heap_ptr_set")?;
 
         opa_heap_ptr_set.call(&mut self.store, (addr.into(),))?;
         Ok(())
@@ -494,13 +494,13 @@ impl<'c> EvalContext<'c> {
     fn create(opa: &'c mut Opa, input: &impl Serialize) -> Result<Self, anyhow::Error> {
         let opa_eval_ctx_new = opa
             .instance
-            .get_typed_func::<(), u32, _>(&mut opa.store, "opa_eval_ctx_new")?;
+            .get_typed_func::<(), u32>(&mut opa.store, "opa_eval_ctx_new")?;
         let opa_eval_ctx_set_input = opa
             .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_input")?;
+            .get_typed_func::<(u32, u32), ()>(&mut opa.store, "opa_eval_ctx_set_input")?;
         let opa_eval_ctx_set_data = opa
             .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_data")?;
+            .get_typed_func::<(u32, u32), ()>(&mut opa.store, "opa_eval_ctx_set_data")?;
 
         opa.set_heap_ptr(opa.input_heap_ptr)?;
 
@@ -531,7 +531,7 @@ impl<'c> EvalContext<'c> {
     where
         O: DeserializeOwned,
     {
-        let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), (), _>(
+        let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), ()>(
             &mut self.opa.store,
             "opa_eval_ctx_set_entrypoint",
         )?;
@@ -539,11 +539,11 @@ impl<'c> EvalContext<'c> {
         let opa_eval_ctx_get_result = self
             .opa
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "opa_eval_ctx_get_result")?;
+            .get_typed_func::<(u32,), u32>(&mut self.opa.store, "opa_eval_ctx_get_result")?;
         let opa_eval = self
             .opa
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
+            .get_typed_func::<(u32,), u32>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
 
         let entrypoint_id = self.opa.entrypoint_id(entrypoint)?;
 
