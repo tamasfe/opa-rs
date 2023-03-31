@@ -21,7 +21,7 @@ pub struct OpaBuilder {
     abort_cb: Option<StrHandler>,
     println_cb: Option<StrHandler>,
     buffer_max_mem_pages: Option<u32>,
-    builtins: HashMap::<String, BuiltinHandler>,
+    builtins: Arc<HashMap<String, BuiltinHandler>>,
     engine: Engine,
 }
 
@@ -61,7 +61,7 @@ impl OpaBuilder {
     }
 
     pub fn with_builtins(mut self, builtin_map: HashMap<String, BuiltinHandler>) -> Self {
-        self.builtins = builtin_map;
+        self.builtins = Arc::new(builtin_map);
         self
     }
 
@@ -86,7 +86,6 @@ impl OpaBuilder {
                 None => {}
             }
         }
-
 
         #[cfg(feature = "wasmtime-cranelift")]
         {
@@ -119,7 +118,12 @@ impl OpaBuilder {
     fn build_module(self, module: Module) -> Result<Opa, anyhow::Error> {
         let engine = self.engine;
         let mut linker = Linker::<State>::new(&engine);
-        let mut store = Store::new(&engine, State { builtins: Default::default() });
+        let mut store = Store::new(
+            &engine,
+            State {
+                builtins: Default::default(),
+            },
+        );
         let env_buffer = Memory::new(&mut store, MemoryType::new(2, self.buffer_max_mem_pages))?;
 
         let on_abort = Arc::<Box<dyn Fn(&str) + Send + Sync>>::from(
@@ -157,43 +161,55 @@ impl OpaBuilder {
             },
         )?;
 
-        // TODO: builtins are not supported for now.
-        linker.func_wrap("env", "opa_builtin0", move |_id: u32, _ctx: u32| 0_u32)?;
+        let builtins = self.builtins.clone();
+        linker.func_wrap(
+            "env",
+            "opa_builtin0",
+            move |caller: Caller<'_, State>, id: u32, ctx: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, Vec::new())
+            },
+        )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin1",
-            move |_id: u32, _ctx: u32, _1: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1])
+            },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin2",
-            move |caller: Caller<'_, State>, id: u32, _ctx: u32, a1: u32, a2: u32| {
-                let name = match caller.data().builtins.get(&id) {
-                    Some(n) => n,
-                    None => {
-                        tracing::error!("builtin id {} not found", id);
-                        return 0u32;
-                    }
-                };
-                tracing::debug!("builtin id={} name={}", id, name.clone());
-                match self.builtins.get(&*name) {
-                    Some(builtin) => builtin(vec![a1, a2]),
-                    None => {
-                        tracing::error!("implementation for builtin {} not provided", name.clone());
-                        0u32
-                    }
-                }
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32, a2: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2])
             },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin3",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32, _3: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32, a2: u32, a3: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2, a3])
+            },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin4",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32, _3: u32, _4: u32| 0_u32,
+            move |caller: Caller<'_, State>,
+                  id: u32,
+                  ctx: u32,
+                  a1: u32,
+                  a2: u32,
+                  a3: u32,
+                  a4: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2, a3, a4])
+            },
         )?;
 
         let instance = linker.instantiate(&mut store, &module)?;
@@ -214,6 +230,30 @@ impl OpaBuilder {
         opa.init()?;
 
         Ok(opa)
+    }
+
+    fn call_builtin(
+        builtins: &HashMap<String, BuiltinHandler>,
+        caller: Caller<'_, State>,
+        id: u32,
+        _ctx: u32,
+        args: Vec<u32>,
+    ) -> u32 {
+        let name = match caller.data().builtins.get(&id) {
+            Some(n) => n,
+            None => {
+                tracing::error!("builtin id {} not found", id);
+                return 0u32;
+            }
+        };
+        tracing::debug!("builtin id={} name={}", id, name.clone());
+        match builtins.get(&*name) {
+            Some(builtin) => builtin(args),
+            None => {
+                tracing::error!("implementation for builtin {} not provided", name.clone());
+                0u32
+            }
+        }
     }
 }
 
@@ -335,7 +375,9 @@ impl Opa {
             .and_then(|int| int.try_into().ok())
             .unwrap_or(0);
 
-        let builtins = self.instance.get_typed_func::<(), u32>(&mut self.store, "builtins")?;
+        let builtins = self
+            .instance
+            .get_typed_func::<(), u32>(&mut self.store, "builtins")?;
         let builtins_addr = builtins.call(&mut self.store, ())?;
         let builtins: HashMap<String, u32> = self.json_at(builtins_addr.into())?;
         self.store.data_mut().builtins = builtins.iter().map(|(k, v)| (*v, k.clone())).collect();
@@ -564,10 +606,10 @@ impl<'c> EvalContext<'c> {
     where
         O: DeserializeOwned,
     {
-        let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), ()>(
-            &mut self.opa.store,
-            "opa_eval_ctx_set_entrypoint",
-        )?;
+        let opa_eval_ctx_set_entrypoint = self
+            .opa
+            .instance
+            .get_typed_func::<(u32, u32), ()>(&mut self.opa.store, "opa_eval_ctx_set_entrypoint")?;
 
         let opa_eval_ctx_get_result = self
             .opa
