@@ -178,13 +178,19 @@ impl WasmPolicyBuilder {
         let output_file_name = self.name;
         let output_file_path = out_dir.join(&format!("{output_file_name}.tar.gz"));
 
-        opa_cmd.args([
-            "build",
-            "-t",
-            "wasm",
-            "-o",
-            output_file_path.to_str().unwrap(),
+        let mut args = Vec::<String>::from([
+            "build".to_string(),
+            "-t".to_string(),
+            "wasm".to_string(),
+            "-o".to_string(),
+            output_file_path.to_str().unwrap().to_string(),
         ]);
+        let capabilities = env::var("OPA_CAPABILITIES");
+        if let Ok(caps) = capabilities {
+            println!("cargo:rustc-env=OPA_CAPABILITIES={caps}");
+            args.append(&mut Vec::from(["--capabilities".to_string(), caps.clone()]));
+        }
+        opa_cmd.args(&args);
 
         if let Some(opt) = self.opt_level {
             opa_cmd.arg("-O");

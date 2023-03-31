@@ -8,13 +8,20 @@ use std::{
 };
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
+pub type BuiltinHandler = Box<dyn Fn(Vec<u32>) -> u32 + Send + Sync>;
 type StrHandler = Box<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Debug)]
+pub struct State {
+    builtins: HashMap<u32, String>,
+}
 
 #[derive(Default)]
 pub struct OpaBuilder {
     abort_cb: Option<StrHandler>,
     println_cb: Option<StrHandler>,
     buffer_max_mem_pages: Option<u32>,
+    builtins: Arc<HashMap<String, BuiltinHandler>>,
     engine: Engine,
 }
 
@@ -53,6 +60,11 @@ impl OpaBuilder {
         self
     }
 
+    pub fn with_builtins(mut self, builtin_map: HashMap<String, BuiltinHandler>) -> Self {
+        self.builtins = Arc::new(builtin_map);
+        self
+    }
+
     /// Build the OPA WASM instance from a module in a bundle.
     ///
     /// # Errors
@@ -74,7 +86,6 @@ impl OpaBuilder {
                 None => {}
             }
         }
-
 
         #[cfg(feature = "wasmtime-cranelift")]
         {
@@ -106,8 +117,13 @@ impl OpaBuilder {
     #[allow(clippy::needless_pass_by_value)]
     fn build_module(self, module: Module) -> Result<Opa, anyhow::Error> {
         let engine = self.engine;
-        let mut linker = Linker::<()>::new(&engine);
-        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::<State>::new(&engine);
+        let mut store = Store::new(
+            &engine,
+            State {
+                builtins: Default::default(),
+            },
+        );
         let env_buffer = Memory::new(&mut store, MemoryType::new(2, self.buffer_max_mem_pages))?;
 
         let on_abort = Arc::<Box<dyn Fn(&str) + Send + Sync>>::from(
@@ -119,13 +135,13 @@ impl OpaBuilder {
             .unwrap_or_else(|| Box::new(default_opa_println));
 
         // https://www.openpolicyagent.org/docs/latest/wasm/#memory-buffer
-        linker.define("env", "memory", env_buffer)?;
+        linker.define(&mut store, "env", "memory", env_buffer)?;
 
         // https://www.openpolicyagent.org/docs/latest/wasm/#imports
         linker.func_wrap(
             "env",
             "opa_abort",
-            move |caller: Caller<'_, ()>, addr: u32| {
+            move |caller: Caller<'_, State>, addr: u32| {
                 let addr = addr as usize;
                 let mem = env_buffer.data(&caller);
                 let s = null_terminated_str(&mem[addr..]).unwrap_or("invalid string in memory");
@@ -135,7 +151,7 @@ impl OpaBuilder {
         linker.func_wrap(
             "env",
             "opa_println",
-            move |caller: Caller<'_, ()>, addr: u32| {
+            move |caller: Caller<'_, State>, addr: u32| {
                 let addr = addr as usize;
                 let mem = env_buffer.data(&caller);
                 match null_terminated_str(&mem[addr..]) {
@@ -145,27 +161,55 @@ impl OpaBuilder {
             },
         )?;
 
-        // TODO: builtins are not supported for now.
-        linker.func_wrap("env", "opa_builtin0", move |_id: u32, _ctx: u32| 0_u32)?;
+        let builtins = self.builtins.clone();
+        linker.func_wrap(
+            "env",
+            "opa_builtin0",
+            move |caller: Caller<'_, State>, id: u32, ctx: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, Vec::new())
+            },
+        )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin1",
-            move |_id: u32, _ctx: u32, _1: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1])
+            },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin2",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32, a2: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2])
+            },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin3",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32, _3: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, ctx: u32, a1: u32, a2: u32, a3: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2, a3])
+            },
         )?;
+
+        let builtins = self.builtins.clone();
         linker.func_wrap(
             "env",
             "opa_builtin4",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32, _3: u32, _4: u32| 0_u32,
+            move |caller: Caller<'_, State>,
+                  id: u32,
+                  ctx: u32,
+                  a1: u32,
+                  a2: u32,
+                  a3: u32,
+                  a4: u32| {
+                Self::call_builtin(&builtins, caller, id, ctx, vec![a1, a2, a3, a4])
+            },
         )?;
 
         let instance = linker.instantiate(&mut store, &module)?;
@@ -187,11 +231,35 @@ impl OpaBuilder {
 
         Ok(opa)
     }
+
+    fn call_builtin(
+        builtins: &HashMap<String, BuiltinHandler>,
+        caller: Caller<'_, State>,
+        id: u32,
+        _ctx: u32,
+        args: Vec<u32>,
+    ) -> u32 {
+        let name = match caller.data().builtins.get(&id) {
+            Some(n) => n,
+            None => {
+                tracing::error!("builtin id {} not found", id);
+                return 0u32;
+            }
+        };
+        tracing::debug!("builtin id={} name={}", id, name.clone());
+        match builtins.get(&*name) {
+            Some(builtin) => builtin(args),
+            None => {
+                tracing::error!("implementation for builtin {} not provided", name.clone());
+                0u32
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Opa {
-    store: Store<()>,
+    store: Store<State>,
     instance: Instance,
     env_buffer: Memory,
 
@@ -296,7 +364,7 @@ impl Opa {
 
         let opa_entrypoints = self
             .instance
-            .get_typed_func::<(), u32, _>(&mut self.store, "entrypoints")?;
+            .get_typed_func::<(), u32>(&mut self.store, "entrypoints")?;
         let ep_addr = opa_entrypoints.call(&mut self.store, ())?;
         self.entrypoints = self.json_at(ep_addr.into())?;
 
@@ -306,6 +374,13 @@ impl Opa {
             .and_then(|global| global.get(&mut self.store).i32())
             .and_then(|int| int.try_into().ok())
             .unwrap_or(0);
+
+        let builtins = self
+            .instance
+            .get_typed_func::<(), u32>(&mut self.store, "builtins")?;
+        let builtins_addr = builtins.call(&mut self.store, ())?;
+        let builtins: HashMap<String, u32> = self.json_at(builtins_addr.into())?;
+        self.store.data_mut().builtins = builtins.iter().map(|(k, v)| (*v, k.clone())).collect();
 
         Ok(())
     }
@@ -324,7 +399,7 @@ impl Opa {
     fn json_at<T: DeserializeOwned>(&mut self, addr: Addr) -> Result<T, anyhow::Error> {
         let opa_json_dump = self
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "opa_json_dump")?;
+            .get_typed_func::<(u32,), u32>(&mut self.store, "opa_json_dump")?;
 
         let json_addr: Addr = opa_json_dump.call(&mut self.store, (addr.into(),))?.into();
         let json_result = serde_json::from_slice::<T>(self.bytes_at(json_addr).unwrap());
@@ -335,7 +410,7 @@ impl Opa {
     fn write_json(&mut self, value: &impl Serialize) -> Result<Addr, anyhow::Error> {
         let opa_json_parse = self
             .instance
-            .get_typed_func::<(u32, u32), u32, _>(&mut self.store, "opa_json_parse")?;
+            .get_typed_func::<(u32, u32), u32>(&mut self.store, "opa_json_parse")?;
 
         let json = serde_json::to_vec(value)?;
         let json_size = json.len();
@@ -360,7 +435,7 @@ impl Opa {
     fn alloc(&mut self, len: usize) -> Result<(Addr, &mut [u8]), anyhow::Error> {
         let opa_malloc = self
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.store, "opa_malloc")?;
+            .get_typed_func::<(u32,), u32>(&mut self.store, "opa_malloc")?;
 
         let addr = opa_malloc.call(&mut self.store, (len as _,))?;
         let data =
@@ -377,7 +452,7 @@ impl Opa {
     fn free(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
         let opa_free = self
             .instance
-            .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_free")?;
+            .get_typed_func::<(u32,), ()>(&mut self.store, "opa_free")?;
         opa_free.call(&mut self.store, (addr.into(),))?;
         Ok(())
     }
@@ -395,7 +470,7 @@ impl Opa {
             u32, // input length
             u32, // heap_ptr
             u32, // format
-        ), u32, _>(&mut self.store, "opa_eval")?;
+        ), u32>(&mut self.store, "opa_eval")?;
 
         let data_addr = self.data_addr.ok_or_else(|| {
             anyhow!("no data provided, `set_data` must be called at least once first")
@@ -448,7 +523,7 @@ impl Opa {
     fn heap_ptr(&mut self) -> Result<Addr, anyhow::Error> {
         let opa_heap_ptr_get = self
             .instance
-            .get_typed_func::<(), u32, _>(&mut self.store, "opa_heap_ptr_get")?;
+            .get_typed_func::<(), u32>(&mut self.store, "opa_heap_ptr_get")?;
 
         Ok(Addr(opa_heap_ptr_get.call(&mut self.store, ())?))
     }
@@ -456,7 +531,7 @@ impl Opa {
     fn set_heap_ptr(&mut self, addr: Addr) -> Result<(), anyhow::Error> {
         let opa_heap_ptr_set = self
             .instance
-            .get_typed_func::<(u32,), (), _>(&mut self.store, "opa_heap_ptr_set")?;
+            .get_typed_func::<(u32,), ()>(&mut self.store, "opa_heap_ptr_set")?;
 
         opa_heap_ptr_set.call(&mut self.store, (addr.into(),))?;
         Ok(())
@@ -494,13 +569,13 @@ impl<'c> EvalContext<'c> {
     fn create(opa: &'c mut Opa, input: &impl Serialize) -> Result<Self, anyhow::Error> {
         let opa_eval_ctx_new = opa
             .instance
-            .get_typed_func::<(), u32, _>(&mut opa.store, "opa_eval_ctx_new")?;
+            .get_typed_func::<(), u32>(&mut opa.store, "opa_eval_ctx_new")?;
         let opa_eval_ctx_set_input = opa
             .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_input")?;
+            .get_typed_func::<(u32, u32), ()>(&mut opa.store, "opa_eval_ctx_set_input")?;
         let opa_eval_ctx_set_data = opa
             .instance
-            .get_typed_func::<(u32, u32), (), _>(&mut opa.store, "opa_eval_ctx_set_data")?;
+            .get_typed_func::<(u32, u32), ()>(&mut opa.store, "opa_eval_ctx_set_data")?;
 
         opa.set_heap_ptr(opa.input_heap_ptr)?;
 
@@ -531,19 +606,19 @@ impl<'c> EvalContext<'c> {
     where
         O: DeserializeOwned,
     {
-        let opa_eval_ctx_set_entrypoint = self.opa.instance.get_typed_func::<(u32, u32), (), _>(
-            &mut self.opa.store,
-            "opa_eval_ctx_set_entrypoint",
-        )?;
+        let opa_eval_ctx_set_entrypoint = self
+            .opa
+            .instance
+            .get_typed_func::<(u32, u32), ()>(&mut self.opa.store, "opa_eval_ctx_set_entrypoint")?;
 
         let opa_eval_ctx_get_result = self
             .opa
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "opa_eval_ctx_get_result")?;
+            .get_typed_func::<(u32,), u32>(&mut self.opa.store, "opa_eval_ctx_get_result")?;
         let opa_eval = self
             .opa
             .instance
-            .get_typed_func::<(u32,), u32, _>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
+            .get_typed_func::<(u32,), u32>(&mut self.opa.store, "eval")?; // does not start with opa_ on purpose
 
         let entrypoint_id = self.opa.entrypoint_id(entrypoint)?;
 
