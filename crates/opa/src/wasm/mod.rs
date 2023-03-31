@@ -8,13 +8,20 @@ use std::{
 };
 use wasmtime::{Caller, Engine, Instance, Linker, Memory, MemoryType, Module, Store};
 
+pub type BuiltinHandler = Box<dyn Fn(Vec<u32>) -> u32 + Send + Sync>;
 type StrHandler = Box<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Debug)]
+pub struct State {
+    builtins: HashMap<u32, String>,
+}
 
 #[derive(Default)]
 pub struct OpaBuilder {
     abort_cb: Option<StrHandler>,
     println_cb: Option<StrHandler>,
     buffer_max_mem_pages: Option<u32>,
+    builtins: HashMap::<String, BuiltinHandler>,
     engine: Engine,
 }
 
@@ -50,6 +57,11 @@ impl OpaBuilder {
     #[must_use]
     pub fn with_engine(mut self, engine: Engine) -> Self {
         self.engine = engine;
+        self
+    }
+
+    pub fn with_builtins(mut self, builtin_map: HashMap<String, BuiltinHandler>) -> Self {
+        self.builtins = builtin_map;
         self
     }
 
@@ -106,8 +118,8 @@ impl OpaBuilder {
     #[allow(clippy::needless_pass_by_value)]
     fn build_module(self, module: Module) -> Result<Opa, anyhow::Error> {
         let engine = self.engine;
-        let mut linker = Linker::<()>::new(&engine);
-        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::<State>::new(&engine);
+        let mut store = Store::new(&engine, State { builtins: Default::default() });
         let env_buffer = Memory::new(&mut store, MemoryType::new(2, self.buffer_max_mem_pages))?;
 
         let on_abort = Arc::<Box<dyn Fn(&str) + Send + Sync>>::from(
@@ -125,7 +137,7 @@ impl OpaBuilder {
         linker.func_wrap(
             "env",
             "opa_abort",
-            move |caller: Caller<'_, ()>, addr: u32| {
+            move |caller: Caller<'_, State>, addr: u32| {
                 let addr = addr as usize;
                 let mem = env_buffer.data(&caller);
                 let s = null_terminated_str(&mem[addr..]).unwrap_or("invalid string in memory");
@@ -135,7 +147,7 @@ impl OpaBuilder {
         linker.func_wrap(
             "env",
             "opa_println",
-            move |caller: Caller<'_, ()>, addr: u32| {
+            move |caller: Caller<'_, State>, addr: u32| {
                 let addr = addr as usize;
                 let mem = env_buffer.data(&caller);
                 match null_terminated_str(&mem[addr..]) {
@@ -155,7 +167,23 @@ impl OpaBuilder {
         linker.func_wrap(
             "env",
             "opa_builtin2",
-            move |_id: u32, _ctx: u32, _1: u32, _2: u32| 0_u32,
+            move |caller: Caller<'_, State>, id: u32, _ctx: u32, a1: u32, a2: u32| {
+                let name = match caller.data().builtins.get(&id) {
+                    Some(n) => n,
+                    None => {
+                        tracing::error!("builtin id {} not found", id);
+                        return 0u32;
+                    }
+                };
+                tracing::debug!("builtin id={} name={}", id, name.clone());
+                match self.builtins.get(&*name) {
+                    Some(builtin) => builtin(vec![a1, a2]),
+                    None => {
+                        tracing::error!("implementation for builtin {} not provided", name.clone());
+                        0u32
+                    }
+                }
+            },
         )?;
         linker.func_wrap(
             "env",
@@ -191,7 +219,7 @@ impl OpaBuilder {
 
 #[derive(Debug)]
 pub struct Opa {
-    store: Store<()>,
+    store: Store<State>,
     instance: Instance,
     env_buffer: Memory,
 
@@ -306,6 +334,11 @@ impl Opa {
             .and_then(|global| global.get(&mut self.store).i32())
             .and_then(|int| int.try_into().ok())
             .unwrap_or(0);
+
+        let builtins = self.instance.get_typed_func::<(), u32>(&mut self.store, "builtins")?;
+        let builtins_addr = builtins.call(&mut self.store, ())?;
+        let builtins: HashMap<String, u32> = self.json_at(builtins_addr.into())?;
+        self.store.data_mut().builtins = builtins.iter().map(|(k, v)| (*v, k.clone())).collect();
 
         Ok(())
     }
